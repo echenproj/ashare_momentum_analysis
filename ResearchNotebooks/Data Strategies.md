@@ -1,3 +1,297 @@
+For **quarterly fundamental data (5,000+ A‑share stocks)** the main challenges are:
+
+* Anti‑scraping throttling
+* Partial failures (timeouts mid-run)
+* Duplicate inserts
+* Structure changes
+* Re-fetching unchanged quarters
+
+Below is a **production‑safe architecture** specifically for large‑scale quarterly fundamental collection in Python.
+
+---
+
+# 🎯 Core Principle
+
+> Quarterly fundamentals change slowly.
+> You should **update by reporting period**, not by stock.
+
+Instead of:
+
+```
+for stock in 5000 stocks:
+    fetch all quarters
+```
+
+Do:
+
+```
+for quarter in reporting_periods:
+    fetch all stocks for that quarter
+```
+
+This reduces API calls dramatically.
+
+---
+
+# ✅ Best Free Sources
+
+Most Python users rely on:
+
+* AkShare (wraps public endpoints like Eastmoney)
+* Tushare (free tier limited but structured)
+
+For large-scale free pulling, **AkShare bulk endpoints per quarter** are usually more stable than per-stock calls.
+
+---
+
+# 🏗 Recommended Architecture
+
+## 1️⃣ Database First (Avoid CSV)
+
+Use SQLite or PostgreSQL.
+
+Table design:
+
+```sql
+CREATE TABLE income_statement (
+    stock_code TEXT,
+    report_date TEXT,
+    revenue REAL,
+    net_profit REAL,
+    ...
+    PRIMARY KEY (stock_code, report_date)
+);
+```
+
+Primary key prevents duplicates automatically.
+
+---
+
+## 2️⃣ Quarter-Based Pulling (Much Faster)
+
+Most providers allow:
+
+```
+Fetch income statement for 2025-09-30
+→ returns ALL stocks
+```
+
+That means:
+
+Instead of:
+
+```
+5000 stocks × 20 quarters = 100,000 calls
+```
+
+You do:
+
+```
+20 quarters = 20 calls
+```
+
+Huge difference.
+
+---
+
+## 3️⃣ Immediate Write + Chunk Commit
+
+Never hold full quarter in memory.
+
+Example:
+
+```python
+df = fetch_quarter("2025-09-30")
+
+for _, row in df.iterrows():
+    insert_to_db(row)
+
+conn.commit()
+```
+
+Or batch every 500 rows.
+
+---
+
+## 4️⃣ Progress Table (Critical for Stability)
+
+Create:
+
+```sql
+CREATE TABLE fetch_progress (
+    report_date TEXT PRIMARY KEY,
+    status TEXT,
+    last_update TIMESTAMP
+);
+```
+
+Workflow:
+
+* Before fetching quarter → check status
+* After success → mark as done
+
+If script crashes:
+
+* Resume only unfinished quarters
+
+---
+
+## 5️⃣ Incremental Strategy (Real-World Use)
+
+Quarterly fundamentals only change:
+
+* After earnings release
+* Or restatement
+
+So you only need to:
+
+* Re-fetch latest 2 quarters
+* Keep historical frozen
+
+Example:
+
+```
+Today = Feb 2026
+Fetch only:
+2025-12-31
+2025-09-30
+```
+
+---
+
+## 6️⃣ Retry + Backoff Layer
+
+Wrap every API call:
+
+```python
+import time
+
+def safe_fetch(func, *args):
+    for attempt in range(5):
+        try:
+            return func(*args)
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None
+```
+
+---
+
+## 7️⃣ Raw JSON Backup (Important)
+
+Before parsing:
+
+```python
+with open(f"raw/{quarter}.json", "w") as f:
+    f.write(response_text)
+```
+
+If parsing fails later, you don’t lose data.
+
+---
+
+## 8️⃣ Run After Market Close
+
+Avoid:
+
+* 9:00–15:00 CST
+
+Better:
+
+* After 18:00 CST
+* Weekends
+
+Sources like Eastmoney throttle more during trading hours.
+
+---
+
+# 🚀 Optimized Workflow for 5000+ Stocks
+
+```
+1. Generate quarter list (last 10 years)
+2. For each quarter:
+       if not done:
+            fetch bulk data
+            write to DB
+            mark done
+3. Re-fetch latest 2 quarters weekly
+```
+
+Total runtime usually < 10 minutes if bulk endpoints used.
+
+---
+
+# ⚡ If Bulk Endpoint Not Available
+
+Fallback strategy:
+
+### Multi-process with throttle control
+
+Use:
+
+```python
+concurrent.futures.ThreadPoolExecutor(max_workers=3)
+```
+
+Keep workers low (2–4).
+Too many → IP ban.
+
+---
+
+# 🔒 Data Integrity Checks
+
+After each quarter:
+
+* Count rows (should be ~5000)
+* Check missing stock codes
+* Log anomalies
+
+---
+
+# 🧠 Advanced: Hash Check for Quarter
+
+Store:
+
+```
+quarter_hash
+```
+
+If hash unchanged → skip parsing.
+
+---
+
+# 💡 Realistic Expectation
+
+For 5000 stocks:
+
+| Method                | API Calls | Stability  |
+| --------------------- | --------- | ---------- |
+| Per stock per quarter | 100k+     | ❌ unstable |
+| Bulk per quarter      | ~40       | ✅ stable   |
+
+Bulk strategy wins.
+
+---
+
+# 🏆 Recommended Stack
+
+* Python
+* AkShare
+* SQLite
+* Quarter-based bulk pulling
+* Exponential retry
+* Progress tracking
+
+This setup is stable even on free IP.
+
+---
+
+
+
+
+
+
+
 Getting **accurate, up‑to‑date A‑share data for free** is possible — but we need to design around throttling, anti‑scraping limits, and unstable endpoints (especially from sources like Eastmoney, Sina Finance, and Tencent Finance).
 
 Below are practical, production‑style strategies to **record data safely as you pull it**, minimize loss, and survive timeouts.
